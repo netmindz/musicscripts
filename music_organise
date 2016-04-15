@@ -1,0 +1,21 @@
+#!/bin/bash
+
+find -L /music/sorted/ -type l  -exec rm -fv {} \;
+
+new=`find /mnt/music/ | wc -l`
+old=`cat /tmp/music_count`
+
+if [ "$new" == "$old" ]; then
+	echo "No Changes"
+	exit 0
+fi
+
+echo "Running import"
+
+/root/scripts/ipod_rename /mnt/music/ 2>&1 > /tmp/ipod_rename.log
+/root/scripts/tidy_raw_music
+
+
+echo $new > /tmp/music_count
+
+mpc update

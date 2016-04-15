@@ -1,0 +1,226 @@
+#!/usr/bin/php
+<?php
+
+// yum install -y id3lib vorbis-tools flac faad2
+
+$lockfp = fopen("/tmp/ipod_rename.lock",'w') or die('lock fail');
+// exclusive lock
+if (flock($lockfp,LOCK_EX)) {
+  fwrite($lockfp,date("r"));
+}
+else  {
+  echo "Error locking file!";
+  die("lock failed");
+}
+
+function process_dir($dir)
+{
+	global $last;
+	print "Proceesing $dir\n";
+	$hd = dir($dir);
+	if(!$hd) {
+		echo("dir failed");
+		return;
+	}
+	$i = 0;
+	while($name = $hd->read()) {
+		$path = realpath($dir . "/" . $name);
+		if(($name == ".")||($name == "..")||(preg_match("#^\.#", $name))) {
+			continue;
+		}
+		if(is_dir($path)) {
+			$i++;
+			process_dir($path);
+		}
+		elseif(is_file($path)) {
+			$i++;
+			print "\tO: $path\n";
+			$mtime = filemtime($path);
+			if(isset($last[$path]) && $last[$path] == $mtime) {
+				continue;
+			}
+			$last[$path] = $mtime;
+			$new_name = process_file($path);
+			$new_path = "/music/sorted/" . $new_name;
+			$new_dir = dirname($new_path);
+			exec("mkdir -p " . escapeshellarg($new_dir));
+			if(($new_name)&&($path != $new_path)) {
+				# print "R";
+				# no idea why i'm doing this check of size 
+				# if((!file_exists($new_path))||(filesize($new_path) > filesize($path))) {
+				if(!file_exists($new_path)) {
+					print "\tN: $new_path\n";
+					symlink("$dir/$name",$new_path);
+				}
+			}
+			else {
+				print "$new_name $new_path";
+			}
+		}
+	}
+	if($i == 0) {
+		print "\t*EMPTY*\n";
+		rmdir($dir);
+	}
+	print "\n";
+	print "writing last.times\n";
+	file_put_contents("/tmp/last.times",serialize($last));
+}
+
+function process_file($path)
+{
+	if(ereg('\.(ogg|mp3|m4a|flac)$',$path,$matches)) {
+		$method = "process_" . $matches[1];
+		return($method($path));
+	}
+	else {
+		print "\tUnknown $path\n";
+	}
+}
+
+function process_ogg($path)
+{
+	print "reading ogg ...";
+	exec("vorbiscomment " . escapeshellarg($path) . "| grep -v 'This file was created by a buggy encoder'",$results,$return);
+	print "done\n";
+	if($return) return("");
+	$data = array('album'=>basename(dirname($path)),'title'=>basename($path),'artist'=>'Unknown');
+	foreach($results as $line) {
+		if(preg_match("/^([A-Z0-9]+)\=(.+)/", $line, $matches)) {
+			$data[strtolower(trim($matches[1]))] = eregi_replace("[^a-z0-9 ()-]","_",$matches[2]);
+		}
+	}
+	unset($results);
+	if(count($data) && (!isset($data['tracknumber']))) $data['tracknumber'] = 0;
+	return getFilePath($data, "ogg");
+}
+
+function process_flac($path)
+{
+	exec("metaflac --export-tags-to=- " . escapeshellarg($path),$results,$return);
+/*
+ARTIST=Electric Penguins
+TITLE=Gelb
+ALBUM=Goodbye from the Electric Penguins
+DATE=2006
+TRACKNUMBER=01
+GENRE=Ambient
+*/
+	if($return) return("");
+	$data = array('album'=>basename(dirname($path)),'title'=>basename($path),'artist'=>'Unknown');
+	foreach($results as $line) {
+		$matches = explode("=",trim($line),2);
+		$data[strtolower(trim($matches[0]))] = eregi_replace("[^a-z0-9 ()-]","_",$matches[1]);
+	}
+	unset($results);
+	if(count($data) && (!isset($data['tracknumber']))) $data['tracknumber'] = 0;
+	return getFilePath($data, "flac");
+}
+
+function process_mp3($path)
+{
+	exec("id3info " . escapeshellarg($path) . " 2>&1",$results,$return);
+	if($return) {
+		print_r($results);
+		return("");
+	}
+	$data = array('album'=>basename(dirname($path)),'title'=>basename($path),'artist'=>'Unknown');
+	$map = array('TIT2'=>'title','TALB'=>'album','TRCK'=>'tracknumber',
+	'TCON'=>'content-type','TYER'=>'year','TPE1'=>'artist','COMM'=>'comments',
+	'TP1'=>'artist','TAL'=>'album','TT2'=>'title',
+	'GEOB'=>'general','MCDI'=>'CD_ID');
+	foreach($results as $line) {
+		if(ereg('([A-Z0-9]+) \(.+\): (.+)',$line,$matches)) {
+			if(isset($map[$matches[1]])) {
+				$data[$map[$matches[1]]] = eregi_replace("[^a-z0-9 ()-]","_",$matches[2]);
+			}
+			else {
+	#			print "Skipping " . $matches[1] . "\n";
+			}
+		}
+	}
+	if(count($data) && (!isset($data['tracknumber']))) $data['tracknumber'] = 0;
+	return getFilePath($data, "mp3");
+}
+
+function process_m4a($path)
+{
+	exec("faad -i " . escapeshellarg($path) . " 2>&1",$results,$return);
+        if($return) {
+                print_r($results);
+                return("");
+        }
+	$data = array('album'=>basename(dirname($path)),'title'=>basename($path),'artist'=>'Unknown');
+	foreach($results as $line) {
+		if(ereg('([^ ]+)\: (.+)',$line,$matches)) {
+			$data[str_replace("_","",$matches[1])] = $matches[2];
+		}
+	}
+	if(count($data) && (!isset($data['track']))) $data['track'] = 0;
+	if(isset($data['track'])) {
+		$data['tracknumber'] = $data['track'];
+		unset($data['track']);
+	}
+	/*
+	    [Build] => Mar 26 2009
+    [2002-2004] => Ahead Software AG
+    [iTunSMPB] =>  00000000 00000840 000001D0 0000000000ECC1F0 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+    [iTunNORM] =>  00000ED0 000010C9 00004A98 00004E74 0005116A 0005116A 00007FDB 00007FDC 00022779 0001BEFC
+    [title] => Different
+    [artist] => Pendulum
+    [album_artist] => Pendulum
+    [album] => In Silico (Bonus Tracks Version)
+    [genre] => Pop
+    [track] => 2
+    [totaltracks] => 16
+    [disc] => 1
+    [totaldiscs] => 1
+    [tempo] => 00000 BPM
+    [date] => 2008-05-12T07:00:00Z
+    [unknown] => 2010-01-06 22:35:55
+    [cover] => ���
+	*/
+	return getFilePath($data, "m4a");
+}
+
+function getFilePath($data, $ext) {
+        if(isset($data['album']) && isset($data['tracknumber']) && isset($data['artist']) && isset($data['title'])) {
+                $artistprefix = "";
+                $album = $data['album'];
+                if(isset($data['musicbrainz_variousartists']) && ($data['musicbrainz_variousartists'] == 0)) {
+                        $album = $data['musicbrainz_albumartist'] . "/" . $data['album'];
+                }
+                elseif(isset($data['albumartist'])) {
+                        $artistprefix = $data['albumartist'] . "/";
+                }
+                return(cleanname($artistprefix) . cleanname($album) . "/" . sprintf("%02d",$data['tracknumber']) . " - " . $data['artist'] . " - " . $data['title'] . "." . $ext);
+        }
+        else {
+                if(count($data)) {
+			print "missing album, tracknumber, artist or title - ";
+			print_r($data);
+		}
+        }
+}
+
+function cleanname($name) {
+	return ereg_replace("[^A-Za-z0-9 /]"," ", $name);
+}
+
+$last = unserialize(file_get_contents("/tmp/last.times"));
+
+$dir = $_SERVER['argv'][1];
+if(!is_dir($dir)) {
+	print_r($_SERVER);
+	die("Dir $dir invalid");
+}
+process_dir($dir);
+
+file_put_contents("/tmp/last.times",serialize($last));
+
+print "\niPOD symlink complete\n";
+
+flock($lockfp,LOCK_UN);
+fclose($lockfp);
+
+?>
